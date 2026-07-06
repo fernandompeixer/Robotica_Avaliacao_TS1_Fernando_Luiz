@@ -218,4 +218,22 @@ O projeto foi dividido em **uma camada de lógica (biblioteca)** e **camadas de 
 ---
 ## C. Análise dos dados
 
+# Demonstração da singularidade durante a movimentação usando a matriz jacobiana 6x6 (mantendo posição e orientação do TCP).
+
 ![Demonstração da singularidade](Graficos_Resultados/Movimento_Linear_Strict.png)
+
+# Demonstração do contorno da singularidade usando PseudoInversa Amortecida.
+
+![DLS_PseudoInversa_Amoretecida](Graficos_Resultados/DLS_PseudoInversa_Amoretecida.png)
+
+# Demonstração do contorno da singularidade usando Controlador por espaço Nulo.
+
+![Teste3_Espaco_Nulo](Graficos_Resultados/Teste3_Espaco_Nulo.png)
+
+# Demonstração dos erros de Posição e Orientação com cada abordagem.
+
+![Comparacao_Erros_Finais](Graficos_Resultados/Comparacao_Erros_Finais.png)
+
+# Demonstração do esforço das juntas e manipulabilidade durante um teste do controlador variando a posição do UR10 por múltiplos pontos.
+
+![Trajetoria_Continua_Waypoints](Graficos_Resultados/Trajetoria_Continua_Waypoints.png)
