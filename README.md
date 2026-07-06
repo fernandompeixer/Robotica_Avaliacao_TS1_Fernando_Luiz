@@ -216,4 +216,6 @@ O projeto foi dividido em **uma camada de lógica (biblioteca)** e **camadas de 
 **Padrão do laço de controle** (repetido, com variações, nas três estratégias): a cada ciclo o código (1) lê o estado atual via RTDE, (2) calcula o erro cartesiano em relação ao alvo, (3) recalcula a Jacobiana e a manipulabilidade naquele ponto, (4) decide a velocidade de junta a enviar — reta, amortecida, ou com espaço nulo, dependendo do teste — (5) satura a velocidade por segurança e (6) envia o comando via RTDE, dormindo um pequeno intervalo (`time.sleep`) antes do próximo ciclo. Esse ciclo síncrono e determinístico é o que permite tanto reagir em tempo real a uma singularidade iminente quanto gravar a telemetria de cada instante.
 
 ---
+## C. Análise dos dados
 
+![Demonstração da singularidade](Graficos_Resultados/Movimento_Linear_Strict.png)
