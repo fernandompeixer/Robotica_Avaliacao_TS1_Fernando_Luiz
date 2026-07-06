@@ -12,68 +12,6 @@ Este repositório contém três scripts em Python que demonstram diferentes estr
 
 ---
 
-## A. Fundamentação Teórica
-
-O núcleo de todo o projeto é a **Jacobiana geométrica** do UR10, `J(q)`, uma matriz 6×6 que relaciona a velocidade das 6 juntas (`q̇`) com a velocidade linear e angular do efetuador (`ẋ`):
-
-```
-ẋ = J(q) · q̇
-```
-
-No código, ela é obtida diretamente pelo `roboticstoolbox` com `J = modelo_cinematico.jacob0(q)`, e suas propriedades são usadas em três frentes:
-
-- **Determinante e manipulabilidade (índice de Yoshikawa):** como `J` é quadrada (6×6) apenas quando se considera posição + orientação, o código calcula
-  ```python
-  w = np.sqrt(max(0, np.linalg.det(J @ J.T)))
-  ```
-  O termo `J @ J.T` é sempre quadrado e positivo-semidefinido, mesmo quando se usa só a submatriz de posição (3×6). Fisicamente, `w` mede o "volume" do elipsoide de manipulabilidade: quanto mais próximo de zero, menos direções o robô consegue se mover livremente naquele instante — ou seja, mais perto de uma singularidade. É esse número que decide, em tempo real, se o robô está entrando em uma zona de risco.
-
-- **Posto (rank) da matriz:** uma singularidade cinemática ocorre exatamente quando `J` perde posto — isto é, quando duas ou mais linhas/colunas se tornam linearmente dependentes e o robô não consegue mais gerar movimento em alguma direção cartesiana, não importa a combinação de velocidades de junta. É esse fenômeno que os testes tentam expor (Teste 1) ou contornar (Testes 2 e 3).
-
-- **Transposição e a Pseudoinversa Amortecida (DLS):** perto da singularidade, a pseudoinversa comum (`J⁺ = Jᵀ(JJᵀ)⁻¹`) explode numericamente, pois `(JJᵀ)` se aproxima de uma matriz singular (não invertível). A solução implementada em `Pseudoinvers_amortecida` e no controlador de malha fechada soma um termo de amortecimento `λ²I` antes da inversão:
-  ```python
-  J_dls = J_v.T @ np.linalg.inv(J_v @ J_v.T + lambda_sq * Identidade_3x3)
-  ```
-  Esse `λ²` (calculado dinamicamente a partir de `w`) evita a divisão por um número quase zero, trocando um pouco de precisão de trajetória por estabilidade numérica — o clássico trade-off da técnica *Damped Least Squares*.
-
-- **Espaço nulo e a matriz identidade:** no controlador de malha fechada, o projetor `Projetor_Nulo = I − J⁺J` usa a pseudoinversa e a identidade para isolar todas as combinações de velocidade de junta que **não** produzem nenhum movimento cartesiano adicional. É nesse subespaço "de graça" que a tarefa secundária (retornar à postura `q_inicial`) é injetada, sem atrapalhar a tarefa primária (seguir o alvo).
-
-Em resumo: **determinante/posto** dizem *se* e *quando* uma singularidade está próxima; **transposição** é a peça-chave tanto da pseudoinversa quanto do seu amortecimento; e o **espaço nulo** é o que permite otimizar a postura do robô sem custo para o objetivo principal.
-
----
-
-## B. Arquitetura da Solução
-
-O projeto foi dividido em **uma camada de lógica (biblioteca)** e **camadas de execução (scripts de teste)**, para permitir reaproveitar os mesmos algoritmos em diferentes cenários sem duplicar código:
-
-- **`Resolvedores_Jacobianos.py` (camada de lógica):** concentra três tipos de responsabilidade:
-  1. *Controle:* as três estratégias de movimento (`explorar_trajetoria_e_gravar`, `Pseudoinvers_amortecida`, `controlador_cartesiano_realtime`), todas seguindo o mesmo padrão de loop de controle (ver abaixo).
-  2. *Utilidades de simulação:* `resetar_robo` (limpa alarmes, destrava paradas de proteção e reposiciona o robô) e `popup_temporizado` (feedback visual no painel do URSim).
-  3. *Telemetria e gráficos:* `iniciar_telemetria`/`gravar_telemetria` (coleta de dados a cada ciclo) e `plotar_analise_cinematica`/`plotar_comparacao_erros` (geração dos relatórios visuais).
-
-- **`Main_testes.py` e `Teste_controlador_xpontos.py` (camada de execução):** cada um importa o módulo (`import Resolvedores_Jacobianos as singu`) e apenas orquestra *qual* função chamar, com *quais* parâmetros, e em *que ordem* — sem reimplementar a lógica de controle.
-
-**Comunicação com o URSim:** feita inteiramente via **RTDE** (Real-Time Data Exchange), o protocolo de rede oficial da Universal Robots, através de três interfaces:
-- `RTDEReceiveInterface` → leitura do estado do robô a cada ciclo (`getActualQ()` para as juntas, `getActualTCPPose()` para a pose cartesiana do efetuador).
-- `RTDEControlInterface` → envio de comandos de velocidade (`speedJ` no espaço de juntas, `speedL` no espaço cartesiano) e de posicionamento (`moveJ`).
-- `DashboardClient` → controle do painel do robô (popups, liberação de paradas de proteção, religamento de scripts) por uma porta separada (Dashboard Server).
-
-**Padrão do laço de controle** (repetido, com variações, nas três estratégias): a cada ciclo o código (1) lê o estado atual via RTDE, (2) calcula o erro cartesiano em relação ao alvo, (3) recalcula a Jacobiana e a manipulabilidade naquele ponto, (4) decide a velocidade de junta a enviar — reta, amortecida, ou com espaço nulo, dependendo do teste — (5) satura a velocidade por segurança e (6) envia o comando via RTDE, dormindo um pequeno intervalo (`time.sleep`) antes do próximo ciclo. Esse ciclo síncrono e determinístico é o que permite tanto reagir em tempo real a uma singularidade iminente quanto gravar a telemetria de cada instante.
-
----
-
-## C. Análise de Dados
-
-Os próprios scripts geram, automaticamente, os gráficos que comprovam o comportamento de cada estratégia — todos salvos em `Graficos_Resultados/`:
-
-- **`plotar_analise_cinematica` (usada em cada teste individual e na navegação por waypoints):** plota, ao longo do tempo de execução, dois eixos sobrepostos: a **manipulabilidade `w`** (índice de Yoshikawa) e a **norma da velocidade de juntas `‖q̇‖`**. É esse gráfico que evidencia visualmente o momento crítico — no Teste 1, `w` despenca e `‖q̇‖` dispara pouco antes do robô ser freado; no Teste 2 e no controlador de malha fechada, `w` se mantém acima do limiar de alerta e `‖q̇‖` permanece controlada, mostrando que o algoritmo conseguiu "desviar" da configuração singular.
-
-- **`plotar_comparacao_erros` (gerada ao final de `Main_testes.py`):** compara, lado a lado, o **erro de posição final (mm)** e o **erro de orientação final (graus)** dos três métodos em relação à mesma pose alvo. Como o alvo é propositalmente colocado numa região de difícil acesso, esse gráfico traduz em números o "custo" que cada estratégia pagou: o método linear simplesmente não conclui (ou para antes), o DLS chega perto mas com desvio de trajetória, e o controlador com espaço nulo tende a apresentar o menor erro combinado de posição/orientação, evidenciando a eficácia da abordagem mais sofisticada.
-
-Juntos, esses gráficos permitem uma leitura dupla: **ao longo do tempo** (como o robô se comportou durante o movimento, via manipulabilidade e velocidade de juntas) e **ao final da execução** (o quão perto do alvo cada método efetivamente chegou), sustentando quantitativamente a comparação entre as três soluções propostas.
-
----
-
 ## 1. Pré-requisitos
 
 ### 1.1. Software necessário
@@ -230,3 +168,54 @@ __pycache__/
 *.pyc
 ```
 para não versionar os gráficos gerados a cada execução.
+
+---
+## A. Fundamentação Teórica
+
+O núcleo de todo o projeto é a **Jacobiana geométrica** do UR10, `J(q)`, uma matriz 6×6 que relaciona a velocidade das 6 juntas (`q̇`) com a velocidade linear e angular do efetuador (`ẋ`):
+
+```
+ẋ = J(q) · q̇
+```
+
+No código, ela é obtida diretamente pelo `roboticstoolbox` com `J = modelo_cinematico.jacob0(q)`, e suas propriedades são usadas em três frentes:
+
+- **Determinante e manipulabilidade (índice de Yoshikawa):** como `J` é quadrada (6×6) apenas quando se considera posição + orientação, o código calcula
+  ```python
+  w = np.sqrt(max(0, np.linalg.det(J @ J.T)))
+  ```
+  O termo `J @ J.T` é sempre quadrado e positivo-semidefinido, mesmo quando se usa só a submatriz de posição (3×6). Fisicamente, `w` mede o "volume" do elipsoide de manipulabilidade: quanto mais próximo de zero, menos direções o robô consegue se mover livremente naquele instante — ou seja, mais perto de uma singularidade. É esse número que decide, em tempo real, se o robô está entrando em uma zona de risco.
+
+- **Posto (rank) da matriz:** uma singularidade cinemática ocorre exatamente quando `J` perde posto — isto é, quando duas ou mais linhas/colunas se tornam linearmente dependentes e o robô não consegue mais gerar movimento em alguma direção cartesiana, não importa a combinação de velocidades de junta. É esse fenômeno que os testes tentam expor (Teste 1) ou contornar (Testes 2 e 3).
+
+- **Transposição e a Pseudoinversa Amortecida (DLS):** perto da singularidade, a pseudoinversa comum (`J⁺ = Jᵀ(JJᵀ)⁻¹`) explode numericamente, pois `(JJᵀ)` se aproxima de uma matriz singular (não invertível). A solução implementada em `Pseudoinvers_amortecida` e no controlador de malha fechada soma um termo de amortecimento `λ²I` antes da inversão:
+  ```python
+  J_dls = J_v.T @ np.linalg.inv(J_v @ J_v.T + lambda_sq * Identidade_3x3)
+  ```
+  Esse `λ²` (calculado dinamicamente a partir de `w`) evita a divisão por um número quase zero, trocando um pouco de precisão de trajetória por estabilidade numérica — o clássico trade-off da técnica *Damped Least Squares*.
+
+- **Espaço nulo e a matriz identidade:** no controlador de malha fechada, o projetor `Projetor_Nulo = I − J⁺J` usa a pseudoinversa e a identidade para isolar todas as combinações de velocidade de junta que **não** produzem nenhum movimento cartesiano adicional. É nesse subespaço "de graça" que a tarefa secundária (retornar à postura `q_inicial`) é injetada, sem atrapalhar a tarefa primária (seguir o alvo).
+
+Em resumo: **determinante/posto** dizem *se* e *quando* uma singularidade está próxima; **transposição** é a peça-chave tanto da pseudoinversa quanto do seu amortecimento; e o **espaço nulo** é o que permite otimizar a postura do robô sem custo para o objetivo principal.
+
+---
+
+## B. Arquitetura da Solução
+
+O projeto foi dividido em **uma camada de lógica (biblioteca)** e **camadas de execução (scripts de teste)**, para permitir reaproveitar os mesmos algoritmos em diferentes cenários sem duplicar código:
+
+- **`Resolvedores_Jacobianos.py` (camada de lógica):** concentra três tipos de responsabilidade:
+  1. *Controle:* as três estratégias de movimento (`explorar_trajetoria_e_gravar`, `Pseudoinvers_amortecida`, `controlador_cartesiano_realtime`), todas seguindo o mesmo padrão de loop de controle (ver abaixo).
+  2. *Utilidades de simulação:* `resetar_robo` (limpa alarmes, destrava paradas de proteção e reposiciona o robô) e `popup_temporizado` (feedback visual no painel do URSim).
+  3. *Telemetria e gráficos:* `iniciar_telemetria`/`gravar_telemetria` (coleta de dados a cada ciclo) e `plotar_analise_cinematica`/`plotar_comparacao_erros` (geração dos relatórios visuais).
+
+- **`Main_testes.py` e `Teste_controlador_xpontos.py` (camada de execução):** cada um importa o módulo (`import Resolvedores_Jacobianos as singu`) e apenas orquestra *qual* função chamar, com *quais* parâmetros, e em *que ordem* — sem reimplementar a lógica de controle.
+
+**Comunicação com o URSim:** feita inteiramente via **RTDE** (Real-Time Data Exchange), o protocolo de rede oficial da Universal Robots, através de três interfaces:
+- `RTDEReceiveInterface` → leitura do estado do robô a cada ciclo (`getActualQ()` para as juntas, `getActualTCPPose()` para a pose cartesiana do efetuador).
+- `RTDEControlInterface` → envio de comandos de velocidade (`speedJ` no espaço de juntas, `speedL` no espaço cartesiano) e de posicionamento (`moveJ`).
+- `DashboardClient` → controle do painel do robô (popups, liberação de paradas de proteção, religamento de scripts) por uma porta separada (Dashboard Server).
+
+**Padrão do laço de controle** (repetido, com variações, nas três estratégias): a cada ciclo o código (1) lê o estado atual via RTDE, (2) calcula o erro cartesiano em relação ao alvo, (3) recalcula a Jacobiana e a manipulabilidade naquele ponto, (4) decide a velocidade de junta a enviar — reta, amortecida, ou com espaço nulo, dependendo do teste — (5) satura a velocidade por segurança e (6) envia o comando via RTDE, dormindo um pequeno intervalo (`time.sleep`) antes do próximo ciclo. Esse ciclo síncrono e determinístico é o que permite tanto reagir em tempo real a uma singularidade iminente quanto gravar a telemetria de cada instante.
+
+---
