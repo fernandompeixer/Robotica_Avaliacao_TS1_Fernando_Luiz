@@ -168,135 +168,54 @@ __pycache__/
 *.pyc
 ```
 para não versionar os gráficos gerados a cada execução.
-
 ---
 ## A. Fundamentação Teórica
 
-O núcleo de todo o projeto é a **Jacobiana geométrica** do UR10, (J(q)),
-uma matriz que relaciona a velocidade das juntas do manipulador
-((`\dot{q}`{=tex})) com a velocidade cartesiana do efetuador
-((`\dot{x}`{=tex})).
+O núcleo de todo o projeto é a **Jacobiana geométrica** do UR10, `J(q)`, uma matriz 6×6 que relaciona a velocidade das 6 juntas (`q̇`) com a velocidade linear e angular do efetuador (`ẋ`):
 
-\[ `\dot{x}`{=tex}=J(q)`\dot{q}`{=tex} \]
-
-No projeto, a Jacobiana é calculada continuamente utilizando o
-`roboticstoolbox` através de:
-
-``` python
-J = modelo_cinematico.jacob0(q)
+```
+ẋ = J(q) · q̇
 ```
 
-Como o robô se movimenta durante toda a execução dos testes, essa matriz
-também muda continuamente, refletindo a configuração instantânea do
-manipulador. A partir dela são obtidas praticamente todas as informações
-utilizadas pelos algoritmos de controle.
+No código, ela é obtida diretamente pelo `roboticstoolbox` com `J = modelo_cinematico.jacob0(q)`, e suas propriedades são usadas em três frentes:
 
-### Manipulabilidade de Yoshikawa
+- **Determinante e manipulabilidade (índice de Yoshikawa):** como `J` é quadrada (6×6) apenas quando se considera posição + orientação, o código calcula
+  ```python
+  w = np.sqrt(max(0, np.linalg.det(J @ J.T)))
+  ```
+  O termo `J @ J.T` é sempre quadrado e positivo-semidefinido, mesmo quando se usa só a submatriz de posição (3×6). Fisicamente, `w` mede o "volume" do elipsoide de manipulabilidade: quanto mais próximo de zero, menos direções o robô consegue se mover livremente naquele instante — ou seja, mais perto de uma singularidade. É esse número que decide, em tempo real, se o robô está entrando em uma zona de risco.
 
-O primeiro parâmetro extraído da Jacobiana é o **índice de
-manipulabilidade**, utilizado como um indicador de proximidade de
-singularidades.
+- **Posto (rank) da matriz:** uma singularidade cinemática ocorre exatamente quando `J` perde posto — isto é, quando duas ou mais linhas/colunas se tornam linearmente dependentes e o robô não consegue mais gerar movimento em alguma direção cartesiana, não importa a combinação de velocidades de junta. É esse fenômeno que os testes tentam expor (Teste 1) ou contornar (Testes 2 e 3).
 
-``` python
-w = np.sqrt(max(0, np.linalg.det(J @ J.T)))
-```
+- **Transposição e a Pseudoinversa Amortecida (DLS):** perto da singularidade, a pseudoinversa comum (`J⁺ = Jᵀ(JJᵀ)⁻¹`) explode numericamente, pois `(JJᵀ)` se aproxima de uma matriz singular (não invertível). A solução implementada em `Pseudoinvers_amortecida` e no controlador de malha fechada soma um termo de amortecimento `λ²I` antes da inversão:
+  ```python
+  J_dls = J_v.T @ np.linalg.inv(J_v @ J_v.T + lambda_sq * Identidade_3x3)
+  ```
+  Esse `λ²` (calculado dinamicamente a partir de `w`) evita a divisão por um número quase zero, trocando um pouco de precisão de trajetória por estabilidade numérica — o clássico trade-off da técnica *Damped Least Squares*.
 
-Ao utilizar (JJ\^T), obtém-se sempre uma matriz quadrada e positiva
-semidefinida. Quanto menor o valor de (w), mais próximo o robô está de
-uma singularidade.
+- **Espaço nulo e a matriz identidade:** no controlador de malha fechada, o projetor `Projetor_Nulo = I − J⁺J` usa a pseudoinversa e a identidade para isolar todas as combinações de velocidade de junta que **não** produzem nenhum movimento cartesiano adicional. É nesse subespaço "de graça" que a tarefa secundária (retornar à postura `q_inicial`) é injetada, sem atrapalhar a tarefa primária (seguir o alvo).
 
-### Posto da Jacobiana
+Em resumo: **determinante/posto** dizem *se* e *quando* uma singularidade está próxima; **transposição** é a peça-chave tanto da pseudoinversa quanto do seu amortecimento; e o **espaço nulo** é o que permite otimizar a postura do robô sem custo para o objetivo principal.
 
-Uma singularidade ocorre quando a Jacobiana perde posto:
+---
 
-\[ rank(J)\<6 \]
+## B. Arquitetura da Solução
 
-Nessa situação, determinadas direções deixam de ser produzidas e outras
-passam a exigir velocidades extremamente elevadas das juntas, tornando a
-pseudoinversa convencional instável.
+O projeto foi dividido em **uma camada de lógica (biblioteca)** e **camadas de execução (scripts de teste)**, para permitir reaproveitar os mesmos algoritmos em diferentes cenários sem duplicar código:
 
-### Pseudoinversa Amortecida (Damped Least Squares)
+- **`Resolvedores_Jacobianos.py` (camada de lógica):** concentra três tipos de responsabilidade:
+  1. *Controle:* as três estratégias de movimento (`explorar_trajetoria_e_gravar`, `Pseudoinvers_amortecida`, `controlador_cartesiano_realtime`), todas seguindo o mesmo padrão de loop de controle (ver abaixo).
+  2. *Utilidades de simulação:* `resetar_robo` (limpa alarmes, destrava paradas de proteção e reposiciona o robô) e `popup_temporizado` (feedback visual no painel do URSim).
+  3. *Telemetria e gráficos:* `iniciar_telemetria`/`gravar_telemetria` (coleta de dados a cada ciclo) e `plotar_analise_cinematica`/`plotar_comparacao_erros` (geração dos relatórios visuais).
 
-A técnica DLS modifica a pseudoinversa para
+- **`Main_testes.py` e `Teste_controlador_xpontos.py` (camada de execução):** cada um importa o módulo (`import Resolvedores_Jacobianos as singu`) e apenas orquestra *qual* função chamar, com *quais* parâmetros, e em *que ordem* — sem reimplementar a lógica de controle.
 
-\[ J\_{DLS}=J^T(JJ^T+`\lambda`{=tex}^2I)^{-1} \]
+**Comunicação com o URSim:** feita inteiramente via **RTDE** (Real-Time Data Exchange), o protocolo de rede oficial da Universal Robots, através de três interfaces:
+- `RTDEReceiveInterface` → leitura do estado do robô a cada ciclo (`getActualQ()` para as juntas, `getActualTCPPose()` para a pose cartesiana do efetuador).
+- `RTDEControlInterface` → envio de comandos de velocidade (`speedJ` no espaço de juntas, `speedL` no espaço cartesiano) e de posicionamento (`moveJ`).
+- `DashboardClient` → controle do painel do robô (popups, liberação de paradas de proteção, religamento de scripts) por uma porta separada (Dashboard Server).
 
-No código:
+**Padrão do laço de controle** (repetido, com variações, nas três estratégias): a cada ciclo o código (1) lê o estado atual via RTDE, (2) calcula o erro cartesiano em relação ao alvo, (3) recalcula a Jacobiana e a manipulabilidade naquele ponto, (4) decide a velocidade de junta a enviar — reta, amortecida, ou com espaço nulo, dependendo do teste — (5) satura a velocidade por segurança e (6) envia o comando via RTDE, dormindo um pequeno intervalo (`time.sleep`) antes do próximo ciclo. Esse ciclo síncrono e determinístico é o que permite tanto reagir em tempo real a uma singularidade iminente quanto gravar a telemetria de cada instante.
 
-``` python
-J_dls = J_v.T @ np.linalg.inv(
-    J_v @ J_v.T + lambda_sq * Identidade_3x3
-)
-```
-
-O diferencial desta implementação é que o amortecimento é
-**adaptativo**. A cada ciclo, a manipulabilidade é recalculada e o valor
-de (`\lambda`{=tex}) aumenta conforme o robô se aproxima de uma
-singularidade.
-
-``` python
-if w < ZONA_DE_ALERTA:
-    lambda_sq = (1 - (w / ZONA_DE_ALERTA)**2) * 0.04
-else:
-    lambda_sq = 0.0
-```
-
-Assim, longe de singularidades o controlador se comporta praticamente
-como a pseudoinversa convencional; próximo delas, ele sacrifica um pouco
-da precisão da trajetória para manter estabilidade numérica e
-velocidades fisicamente realizáveis.
-
-### Controle Cartesiano em Malha Fechada
-
-O controlador executa continuamente:
-
-1.  Leitura da pose atual;
-2.  Cálculo do erro cartesiano;
-3.  Atualização da Jacobiana;
-4.  Recalculo da pseudoinversa amortecida;
-5.  Envio de um novo comando de velocidade.
-
-A velocidade desejada é obtida por um controlador proporcional:
-
-``` python
-v_desejado = kp * vetor_python
-```
-
-Como esse processo é repetido aproximadamente a cada 20 ms, qualquer
-erro é continuamente corrigido.
-
-### Controle por Espaço Nulo
-
-O controlador implementa uma estratégia hierárquica de duas tarefas.
-
-A tarefa primária leva o efetuador ao alvo utilizando a pseudoinversa
-amortecida.
-
-A tarefa secundária utiliza o espaço nulo da Jacobiana para corrigir a
-postura do robô sem alterar significativamente o movimento cartesiano.
-
-O projetor utilizado é
-
-\[ N = I - J\^+J \]
-
-``` python
-Projetor_Nulo = I_6x6 - (J_v_pinv @ J_v)
-```
-
-Em seguida, calcula-se um erro de postura em relação à configuração
-inicial:
-
-``` python
-erro_postura = q_inicial - q_atual
-q_dot_secundario = Projetor_Nulo @ (K_postura * erro_postura)
-```
-
-Finalmente, as duas tarefas são combinadas:
-
-``` python
-q_dot_final = q_dot_primario + q_dot_secundario
-```
-
-Essa estratégia permite que o robô atinja o alvo enquanto evita
-permanecer em configurações desfavoráveis ou próximas de singularidades.
+---
 
