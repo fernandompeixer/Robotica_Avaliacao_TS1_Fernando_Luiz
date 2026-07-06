@@ -193,9 +193,7 @@ No código, ela é obtida diretamente pelo `roboticstoolbox` com `J = modelo_cin
   ```
   Esse `λ²` (calculado dinamicamente a partir de `w`) evita a divisão por um número quase zero, trocando um pouco de precisão de trajetória por estabilidade numérica — o clássico trade-off da técnica *Damped Least Squares*.
 
-- **Espaço nulo e a matriz identidade:** no controlador de malha fechada, o projetor `Projetor_Nulo = I − J⁺J` usa a pseudoinversa e a identidade para isolar todas as combinações de velocidade de junta que **não** produzem nenhum movimento cartesiano adicional. É nesse subespaço "de graça" que a tarefa secundária (retornar à postura `q_inicial`) é injetada, sem atrapalhar a tarefa primária (seguir o alvo).
-
-Em resumo: **determinante/posto** dizem *se* e *quando* uma singularidade está próxima; **transposição** é a peça-chave tanto da pseudoinversa quanto do seu amortecimento; e o **espaço nulo** é o que permite otimizar a postura do robô sem custo para o objetivo principal.
+Em síntese, o determinante e o posto da Jacobiana constituem os principais indicadores da proximidade e da ocorrência de singularidades cinemáticas. A transposição da Jacobiana desempenha papel fundamental na formulação da pseudoinversa e, consequentemente, da pseudoinversa amortecida, utilizada para aumentar a robustez numérica do controlador em regiões críticas. Por fim, o espaço nulo da Jacobiana possibilita a incorporação de tarefas secundárias, como a otimização da postura do manipulador, sem comprometer o desempenho da tarefa primária de controle cartesiano.
 
 ---
 
